@@ -1,5 +1,8 @@
 // ********************* Includes *********************
-//#define PEDAL_USB
+//TODO: in 2020 these were required or the pedal didn't work
+#define PEDAL_USB
+#define DEBUG
+
 #include "../config.h"
 
 #include "early_init.h"
@@ -100,6 +103,10 @@ int usb_cb_control_msg(USB_Setup_TypeDef *setup, uint8_t *resp, bool hardwired) 
 #define CAN_GAS_OUTPUT 0x201U
 #define CAN_GAS_SIZE 6
 #define COUNTER_CYCLE 0xFU
+#define MAGIC_GAS_MULTIPLIER 0xFACE
+#define MAGIC_GAS_DIVISOR 0xDEAD
+#define MAGIC_GAS_OFFSET 0xBABE
+#define MAGIC_GAS_OFFSET_NEG 0xBEEF
 
 void CAN1_TX_IRQ_Handler(void) {
   // clear interrupt
@@ -109,6 +116,11 @@ void CAN1_TX_IRQ_Handler(void) {
 // two independent values
 uint16_t gas_set_0 = 0;
 uint16_t gas_set_1 = 0;
+
+uint16_t gas_scale_multiplier = 1;
+uint16_t gas_scale_divisor = 1;
+int16_t gas_offset = 0;
+
 
 #define MAX_TIMEOUT 10U
 uint32_t timeout = 0;
@@ -154,7 +166,35 @@ void CAN1_RX0_IRQ_Handler(void) {
       bool enable = ((dat[4] >> 7) & 1U) != 0U;
       uint8_t index = dat[4] & COUNTER_CYCLE;
       if (crc_checksum(dat, CAN_GAS_SIZE - 1, crc_poly) == dat[5]) {
-        if (((current_index + 1U) & COUNTER_CYCLE) == index) {
+        //Using magic values in value_
+        if (value_1 == MAGIC_GAS_MULTIPLIER && value_0 != value_1 && value_0 != gas_scale_multiplier) {
+          #ifdef DEBUG
+            puts("setting multiplier ");
+            puth(value_0);
+            puts("\n");
+          #endif
+          gas_scale_multiplier = value_0;
+        }
+        else if (value_1 == MAGIC_GAS_DIVISOR && value_0 != value_1 && value_0 != gas_scale_divisor) {
+          #ifdef DEBUG
+            puts("setting divisor ");
+            puth(value_0);
+            puts("\n");
+          #endif
+          gas_scale_divisor = value_0;
+        }
+        else if ((value_1 == MAGIC_GAS_OFFSET || value_1 == MAGIC_GAS_OFFSET_NEG) && value_0 != value_1) {
+          int offsetval = value_1 == MAGIC_GAS_OFFSET ? (int)value_0 : (int)value_0 * -1; //value_1 is 0 for positive, 1 for negative
+          if (offsetval != gas_offset) {
+          #ifdef DEBUG
+            puts("setting offset ");
+            puth(offsetval);
+            puts("\n");
+          #endif
+          gas_offset = offsetval;
+          }
+        }
+        else if (((current_index + 1U) & COUNTER_CYCLE) == index) {
           #ifdef DEBUG
             puts("setting gas ");
             puth(value_0);
@@ -245,12 +285,18 @@ void TIM3_IRQ_Handler(void) {
   }
 }
 
+//Scale values from the ADC to adjust for unusual electrical characteristics
+//TODO: verify inputs are within range and we don't get outlandish crashy values while waiting for all 3 values
+uint32_t adjust(uint32_t readVal) {
+  return ((readVal * gas_scale_multiplier)/gas_scale_divisor) + gas_offset;
+}
+
 // ***************************** main code *****************************
 
 void pedal(void) {
   // read/write
-  pdl0 = adc_get(ADCCHAN_ACCEL0);
-  pdl1 = adc_get(ADCCHAN_ACCEL1);
+  pdl0 = adjust(adc_get(ADCCHAN_ACCEL0));
+  pdl1 = adjust(adc_get(ADCCHAN_ACCEL1));
 
   // write the pedal to the DAC
   if (state == NO_FAULT) {
