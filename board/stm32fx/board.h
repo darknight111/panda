@@ -33,7 +33,7 @@ void detect_board_type(void) {
       hw_type = HW_TYPE_WHITE_PANDA;
       current_board = &board_white;
     } else if(detect_with_pull(GPIOA, 13, PULL_DOWN)) { // Rev AB deprecated, so no pullup means black. In REV C, A13 is pulled up to 5V with a 10K
-      hw_type = HW_TYPE_GREY_PANDA;
+      hw_type = HW_TYPE_BLACK_PANDA; //Extraordinaly poor taste
       current_board = &board_grey;
     } else if(!detect_with_pull(GPIOB, 15, PULL_UP)) {
       hw_type = HW_TYPE_UNO;
