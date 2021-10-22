@@ -18,7 +18,11 @@ const int GM_DRIVER_TORQUE_FACTOR = 4;
 const int GM_MAX_GAS = 3072;
 const int GM_MAX_REGEN = 1404;
 const int GM_MAX_BRAKE = 350;
-const CanMsg GM_TX_MSGS[] = {{384, 0, 4}, {1033, 0, 7}, {1034, 0, 7}, {715, 0, 8}, {880, 0, 6},  // pt bus
+const uint32_t GM_LKAS_MIN_INTERVAL = 20000;    // 20ms minimum between LKAS frames
+const int GM_GAS_INTERCEPTOR_THRESHOLD = 458;  // (610 + 306.25) / 2ratio between offset and gain from dbc file
+#define GM_GET_INTERCEPTOR(msg) (((GET_BYTE((msg), 0) << 8) + GET_BYTE((msg), 1) + (GET_BYTE((msg), 2) << 8) + GET_BYTE((msg), 3)) / 2) // avg between 2 tracks
+
+const CanMsg GM_TX_MSGS[] = {{384, 0, 4}, {1033, 0, 7}, {1034, 0, 7}, {715, 0, 8}, {880, 0, 6}, {512, 0, 6},  // pt bus
                              {161, 1, 7}, {774, 1, 8}, {776, 1, 7}, {784, 1, 2},   // obs bus
                              {789, 2, 5},  // ch bus
                              {0x104c006c, 3, 3}, {0x10400060, 3, 5}};  // gmlan
@@ -30,9 +34,73 @@ AddrCheckStruct gm_addr_checks[] = {
   {.msg = {{481, 0, 7, .expected_timestep = 100000U}, { 0 }, { 0 }}},
   {.msg = {{241, 0, 6, .expected_timestep = 100000U}, { 0 }, { 0 }}},
   {.msg = {{417, 0, 7, .expected_timestep = 100000U}, { 0 }, { 0 }}},
+  {.msg = {{513, 0, 6, .expected_timestep = 100000U}, { 0 }, { 0 }}}, //pedal inbound (enforce length in case of overlap)
+  //{.msg = {{384, 0, 4, .expected_timestep = 100000U}, { 0 }, { 0 }}}, // Object and or chassis bus includes 384 with different size
 };
 #define GM_RX_CHECK_LEN (sizeof(gm_addr_checks) / sizeof(gm_addr_checks[0]))
 addr_checks gm_rx_checks = {gm_addr_checks, GM_RX_CHECK_LEN};
+
+//LKAS vars for ensuring in-order, correct timing
+
+enum gm_lkas_state {gm_never,gm_recent,gm_past};
+
+enum gm_lkas_state gm_lkas_ptbus_state = gm_never;
+
+
+
+int gm_camera_bus = 2; //2 is c2 default. 1 for obd
+
+uint32_t gm_init_ts = 0;
+
+int gm_lkas_last_rc = -1; //last rolling counter
+uint32_t gm_lkas_last_ts = 0;
+
+
+//TODO: Make sure it is possible to RX before relay flips. More pervasive changes will be required if not
+
+bool gm_camera_on_pt = true; // Block tx while camera is still on PT bus. Assume true.
+bool gm_bad_cam_traffic = false; // Unexpected traffic on cam bus means radar or chassis
+int gm_valid_lkas_cnt = 0;
+bool gm_enable_fwd = false;
+int gm_good_lkas_cnt = 0; //after 
+
+
+// TODO: Reminder: Handle remap of chassis and radar in OP
+
+static int gm_next_rc(int current_rc) {
+  //Should be faster than modulo
+  int ret = 0;
+  if (current_rc <= 2) {
+    ret = current_rc + 1;
+  }
+  return ret;
+}
+
+static bool gm_verify_lkas(CAN_FIFOMailBox_TypeDef *to_check) {
+  //Try to make sure message 384 is actually an LKAS message
+  int is_correct = true;
+
+  int len = GET_LEN(to_check);
+  if (len != 4) {
+    is_correct = false;
+  }
+  else {
+    int rolling_counter = GET_BYTE(to_check, 0) >> 4;
+    if (rolling_counter < 0 || rolling_counter > 3) {
+      is_correct = false;
+    }
+    else {
+      int desired_torque = ((GET_BYTE(to_check, 0) & 0x7U) << 8) + GET_BYTE(to_check, 1);
+      if (!max_limit_check(desired_torque, GM_MAX_STEER + 200, -(GM_MAX_STEER + 200))) {
+        is_correct = false;
+      }
+    }
+  }
+  return is_correct;
+}
+
+
+
 
 static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
 
@@ -40,6 +108,51 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
 
   if (valid && (GET_BUS(to_push) == 0)) {
     int addr = GET_ADDR(to_push);
+    int len = GET_LEN(to_push);
+
+    // LKAS messages should only be received on the PT bus if the relay is closed
+    // Either it hasn't opened yet, or it faulted
+    if (addr == 384) {
+      if ((gm_lkas_ptbus_state == gm_past) || gm_camera_on_pt == false) {
+        relay_malfunction_set();
+        // We will allow forwarding to resume if camera disappears from PT
+        // Reset good frame counter
+        gm_good_lkas_cnt = 0;
+      }
+      gm_enable_fwd = false;
+      gm_camera_on_pt = true;
+      gm_lkas_ptbus_state = gm_recent;
+      uint32_t ts = microsecond_timer_get();
+      gm_lkas_last_rc = GET_BYTE(to_push, 0) >> 4;
+      gm_lkas_last_ts = ts;
+    }
+
+    // If it has been 400ms since startup and we have seen no LKAS on PT bus,
+    // it is safe to assume we will not and we can enable TX
+    if (gm_lkas_ptbus_state == gm_never) {
+      uint32_t ts2 = microsecond_timer_get();
+      uint32_t elapsed2 = get_ts_elapsed(ts2, gm_init_ts);
+      if (elapsed2 > (500 * 1000)) {
+        gm_camera_on_pt = false;
+      }
+    }
+    else if (gm_lkas_ptbus_state == gm_recent) {
+      //check to see if has been long enough since the last lkas on PT to assume relay opened
+      uint32_t ts = microsecond_timer_get();
+      uint32_t elapsed = get_ts_elapsed(ts, gm_lkas_last_ts);
+      if (elapsed > (500 * 1000)) {
+        gm_lkas_ptbus_state = gm_past;
+        gm_camera_on_pt = false;
+      }
+    }
+
+    // Pedal Interceptor
+    if (addr == 0x201 && len == 6) {
+      gas_interceptor_detected = 1;
+      int gas_interceptor = GM_GET_INTERCEPTOR(to_push);
+      gas_pressed = gas_interceptor > GM_GAS_INTERCEPTOR_THRESHOLD;
+      gas_interceptor_prev = gas_interceptor;
+    }
 
     if (addr == 388) {
       int torque_driver_new = ((GET_BYTE(to_push, 6) & 0x7) << 8) | GET_BYTE(to_push, 7);
@@ -54,6 +167,7 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
       vehicle_moving = GET_BYTE(to_push, 0) | GET_BYTE(to_push, 1);
     }
 
+    //TODO: Swap activation to when cc is off!!
     // ACC steering wheel buttons
     if (addr == 481) {
       int button = (GET_BYTE(to_push, 5) & 0x70) >> 4;
@@ -63,7 +177,9 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
           controls_allowed = 1;
           break;
         case 6:  // cancel
-          controls_allowed = 0;
+          if (!gas_interceptor_detected) {
+            controls_allowed = 0;
+          }
           break;
         default:
           break;  // any other button is irrelevant
@@ -126,6 +242,21 @@ static int gm_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
   }
   bool current_controls_allowed = controls_allowed && !pedal_pressed;
 
+  // GAS: Interceptor safety check
+  if (addr == 0x200) {
+    if (!current_controls_allowed) {
+      if (GET_BYTE(to_send, 0) || GET_BYTE(to_send, 1)) {
+        puts("gas safety check failed");
+        tx = 0;
+      }
+    }
+  }
+
+  // // disallow actuator commands if gas or brake (with vehicle moving) are pressed
+  // // and the the latching controls_allowed flag is True
+  // int pedal_pressed = gm_gas_prev || (gm_brake_prev && gm_moving);
+  // bool current_controls_allowed = controls_allowed && !pedal_pressed;
+
   // BRAKE: safety check
   if (addr == 789) {
     int brake = ((GET_BYTE(to_send, 0) & 0xFU) << 8) + GET_BYTE(to_send, 1);
@@ -141,7 +272,8 @@ static int gm_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
   }
 
   // LKA STEER: safety check
-  if (addr == 384) {
+  if ((gm_camera_on_pt != true) && (addr == 384)) {
+    int rolling_counter = GET_BYTE(to_send, 0) >> 4;
     int desired_torque = ((GET_BYTE(to_send, 0) & 0x7U) << 8) + GET_BYTE(to_send, 1);
     uint32_t ts = microsecond_timer_get();
     bool violation = 0;
@@ -186,6 +318,23 @@ static int gm_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
     if (violation) {
       tx = 0;
     }
+
+    //TODO: Maybe should be checked at the moment the frame is sent via CAN - rcv interrupt could maybe prevent sending??
+    if (tx == 1) {
+      uint32_t lkas_elapsed = get_ts_elapsed(ts, gm_lkas_last_ts);
+      int expected_lkas_rc = gm_next_rc(gm_lkas_last_rc);    //(gm_lkas_last_rc + 1) % 4;
+      //If less than 20ms have passed since last LKAS message or the rolling counter value isn't correct it is a violation
+      //TODO: The interval may need some fine tuning - testing the tolerance of the PSCM / send lag
+      if (lkas_elapsed < GM_LKAS_MIN_INTERVAL || rolling_counter != expected_lkas_rc) {
+        tx = 0;
+      }
+      else {
+        //otherwise, save values
+        gm_lkas_last_rc = rolling_counter;
+        gm_lkas_last_ts = ts;
+      }
+    }
+
   }
 
   // GAS/REGEN: safety check
@@ -212,13 +361,70 @@ static const addr_checks* gm_init(int16_t param) {
   UNUSED(param);
   controls_allowed = false;
   relay_malfunction_reset();
+
+  if (car_harness_status == HARNESS_STATUS_NC) {
+    //OBD harness and older pandas use bus 1 and no relay
+    gm_camera_bus = 1;
+    gm_camera_on_pt = false;
+    gm_init_ts = microsecond_timer_get();
+  }
+
   return &gm_rx_checks;
 }
+
+static int gm_fwd_hook(int bus_num, CAN_FIFOMailBox_TypeDef *to_fwd) {
+  int bus_fwd = -1;
+
+  // TODO: Simplify logic!
+
+  //Being careful to only forward when safe
+  if (gm_enable_fwd && !gm_camera_on_pt && !gm_bad_cam_traffic) {
+    if (bus_num == 0) {
+      bus_fwd = gm_camera_bus; // PT Bus -> FFC
+    }
+    else if (bus_num == gm_camera_bus) {
+      //Note: trusting that init completes before this
+      int addr = GET_ADDR(to_fwd);
+      //FFC -> PT Bus, block LKAS
+      if (addr != 384) {
+        bus_fwd = 0;
+      }
+    }
+  }
+  else {
+    if (!gm_camera_on_pt && !gm_bad_cam_traffic && bus_num == gm_camera_bus) {
+      //camera is not on PT bus and we haven't seen anything bad on camera bus
+      int addr = GET_ADDR(to_fwd);
+
+      if (addr == 384) {
+        // Test frame. If it has 384 but doesn't have correct format permanently block forwarding
+        if (gm_verify_lkas(to_fwd)) {
+          gm_good_lkas_cnt++;
+        }
+        else {
+          gm_good_lkas_cnt = 0;
+          gm_bad_cam_traffic = true;
+          gm_enable_fwd = false;
+        }
+
+        //If we have seen 9 valid LKAS frames on the cam bus, AND it is not on the PT, enable forwarding
+        if (gm_good_lkas_cnt >= 9) {
+          gm_enable_fwd = true;
+          bus_fwd = 0;
+        }
+      }
+    }
+  }
+
+  return bus_fwd;
+}
+
+
 
 const safety_hooks gm_hooks = {
   .init = gm_init,
   .rx = gm_rx_hook,
   .tx = gm_tx_hook,
   .tx_lin = nooutput_tx_lin_hook,
-  .fwd = default_fwd_hook,
+  .fwd = gm_fwd_hook,
 };
