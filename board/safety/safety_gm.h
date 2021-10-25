@@ -7,6 +7,7 @@
 //      accel rising edge
 //      brake rising edge
 //      brake > 0mph
+//TODO: The logic in here can be simplified dramatically
 
 const int GM_MAX_STEER = 300;
 const int GM_MAX_RT_DELTA = 128;          // max delta torque allowed for real time checks
@@ -56,8 +57,10 @@ int gm_lkas_last_rc = -1; // Last rolling counter
 uint32_t gm_lkas_last_ts = 0; // TS of last LKAS frame
 
 
-//TODO: Make sure it is possible to RX before relay flips. More pervasive changes will be required if not
 
+
+bool gm_has_relay = true; // If there is a relay (harness) present
+bool gm_relay_open_requested = false; // We must enable the relay ourselves so we can capture stock camera RC
 bool gm_camera_on_pt = true; // Block tx while camera is still on PT bus. Assume true.
 bool gm_bad_cam_traffic = false; // Unexpected traffic on cam bus means radar or chassis
 bool gm_enable_fwd = false; // All conditions are clear to enable forwarding!
@@ -69,7 +72,7 @@ int gm_good_lkas_cnt = 0; // Number of valid LKAS frames on cam bus up to limit
 static int gm_next_rc(int current_rc) {
   //Should be faster than modulo
   int ret = 0;
-  if (current_rc <= 2) {
+  if (current_rc < 3) {
     ret = current_rc + 1;
   }
   return ret;
@@ -95,6 +98,7 @@ static bool gm_verify_lkas(CAN_FIFOMailBox_TypeDef *to_check) {
       if (!max_limit_check(desired_torque, GM_MAX_STEER, -GM_MAX_STEER)) {
         puts("gm_verify_lkas: FYI: Torque out of range - Condition disabled\n");
         //is_correct = false;
+        //TODO: dump torque value
       }
     }
   }
@@ -113,7 +117,7 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
     int len = GET_LEN(to_push);
 
 
-    if (gm_camera_on_pt) {
+    if (gm_has_relay && gm_camera_on_pt) { //defaults true
       if (gm_lkas_ptbus_state == gm_recent) {
         // Check to see if has been long enough since the last lkas on PT to assume relay opened
         // Stock inactive frames are every 100ms - so 5 missed frames
@@ -141,23 +145,41 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
     // Either it hasn't opened yet, or it faulted
     if (addr == 384) {
       puts("gm_rx_hook: LKAS frame on PT bus\n");
-      //TODO: Do we need to run all this if in Dashcam mode?
-      gm_enable_fwd = false;
-      gm_camera_on_pt = true;
-      gm_lkas_ptbus_state = gm_recent;
-      uint32_t ts = microsecond_timer_get();
-      gm_lkas_last_ts = ts;
-      gm_lkas_last_rc = GET_BYTE(to_push, 0) >> 4;
+      if (gm_has_relay) {
+        //TODO: Do we need to run all this if in Dashcam mode?
+        gm_enable_fwd = false;
+        gm_camera_on_pt = true;
+        gm_lkas_ptbus_state = gm_recent;
+        uint32_t ts = microsecond_timer_get();
+        gm_lkas_last_ts = ts;
+        gm_lkas_last_rc = GET_BYTE(to_push, 0) >> 4;
 
+        if ((gm_lkas_ptbus_state == gm_past) || gm_camera_on_pt == false) {
+          puts("gm_rx_hook: unexpected LKAS frame on PT bus - relay malfunction?\n");
+          relay_malfunction_set();
+          // We will allow forwarding to resume if camera disappears from PT
+          // Note on picky EPS chances are good LKAS faulted
+          // Reset good frame counter
+          gm_good_lkas_cnt = 0;
+        }
 
-      if ((gm_lkas_ptbus_state == gm_past) || gm_camera_on_pt == false) {
-        puts("gm_rx_hook: unexpected LKAS frame on PT bus - relay malfunction?\n");
-        relay_malfunction_set();
-        // We will allow forwarding to resume if camera disappears from PT
-        // Note on picky EPS chances are good LKAS faulted
-        // Reset good frame counter
-        gm_good_lkas_cnt = 0;
+        if (gm_has_relay && !gm_relay_open_requested) {
+          //Copied from main.c
+          set_intercept_relay(true);
+          heartbeat_counter = 0U;
+          heartbeat_lost = false;
+          //
+          gm_relay_open_requested = true;
+        }
       }
+      else {
+        // If there is no relay we should never see cam on PT bus. Permaban forwarding
+        // TODO: this should trigger dashcam mode
+        gm_camera_on_pt = true;
+        gm_enable_fwd = false;
+        gm_bad_cam_traffic = true;
+      }
+
     }
 
     // Pedal Interceptor
@@ -223,7 +245,8 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
     // on powertrain bus.
     // 384 = ASCMLKASteeringCmd
     // 715 = ASCMGasRegenCmd
-    generic_rx_checks(((addr == 384) || (addr == 715)));
+    // Removing 384 as we to expect it
+    generic_rx_checks(addr == 715);
   }
   return valid;
 }
@@ -287,7 +310,7 @@ static int gm_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
 
   // LKA STEER: safety check
   if (addr == 384) {
-    if (gm_camera_on_pt != true) {
+    if (gm_camera_on_pt) {
       tx = 0; //No LKAS from OP if camera is on PT bus
     }
     else {
@@ -343,7 +366,7 @@ static int gm_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
         int expected_lkas_rc = gm_next_rc(gm_lkas_last_rc);    //(gm_lkas_last_rc + 1) % 4;
         //If less than 20ms have passed since last LKAS message or the rolling counter value isn't correct it is a violation
         //TODO: The interval may need some fine tuning - testing the tolerance of the PSCM / send lag
-        if (lkas_elapsed < GM_LKAS_MIN_INTERVAL || rolling_counter != expected_lkas_rc) {
+        if (lkas_elapsed < GM_LKAS_MIN_INTERVAL || rolling_counter != expected_lkas_rc) { //TODO: move into violation
           tx = 0;
         }
         else {
@@ -386,6 +409,7 @@ static const addr_checks* gm_init(int16_t param) {
   if (car_harness_status == HARNESS_STATUS_NC) {
     puts("gm_init: No harness attached, assuming OBD or Giraffe\n");
     //OBD harness and older pandas use bus 1 and no relay
+    gm_has_relay = false;
     gm_camera_bus = 1;
     gm_camera_on_pt = false;
   }
@@ -397,6 +421,7 @@ static int gm_fwd_hook(int bus_num, CAN_FIFOMailBox_TypeDef *to_fwd) {
   int bus_fwd = -1;
 
   // TODO: Simplify logic!
+  //TODO: incorporate gm_has_harness and gm_harness_open_requested.
 
   //Being careful to only forward when safe
   if (gm_enable_fwd && !gm_camera_on_pt && !gm_bad_cam_traffic) {
