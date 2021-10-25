@@ -21,7 +21,6 @@ struct harness_configuration {
 void set_intercept_relay(bool intercept) {
   if (car_harness_status != HARNESS_STATUS_NC) {
     if (intercept) {
-      puts("RUNNING GM VARIANT\n"); //TODO: Remove this
       puts("switching harness to intercept (relay on)\n");
     } else {
       puts("switching harness to passthrough (relay off)\n");

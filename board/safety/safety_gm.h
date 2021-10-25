@@ -81,20 +81,20 @@ static bool gm_verify_lkas(CAN_FIFOMailBox_TypeDef *to_check) {
 
   int len = GET_LEN(to_check);
   if (len != 4) {
-    puts("gm_verify_lkas: Frame is wrong size!");
+    puts("gm_verify_lkas: Frame is wrong size!\n");
     is_correct = false;
   }
   else {
     int rolling_counter = GET_BYTE(to_check, 0) >> 4;
     if (rolling_counter < 0 || rolling_counter > 3) {
       is_correct = false;
-      puts("gm_verify_lkas: Rolling counter out of range");
+      puts("gm_verify_lkas: Rolling counter out of range\n");
     }
     else {
       int desired_torque = ((GET_BYTE(to_check, 0) & 0x7U) << 8) + GET_BYTE(to_check, 1);
-      if (!max_limit_check(desired_torque, GM_MAX_STEER + 200, -(GM_MAX_STEER + 200))) {
-        puts("gm_verify_lkas: Torque out of range");
-        is_correct = false;
+      if (!max_limit_check(desired_torque, GM_MAX_STEER, -GM_MAX_STEER) {
+        puts("gm_verify_lkas: FYI: Torque out of range - Condition disabled\n");
+        //is_correct = false;
       }
     }
   }
@@ -120,18 +120,18 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
         uint32_t ts = microsecond_timer_get();
         uint32_t elapsed = get_ts_elapsed(ts, gm_lkas_last_ts);
         if (elapsed > (500 * 1000)) {
-          puts("gm_rx_hook: LKAS disappeared from PT, setting past and off PT");
+          puts("gm_rx_hook: LKAS disappeared from PT, setting past and off PT\n");
           gm_lkas_ptbus_state = gm_past;
           gm_camera_on_pt = false;
         }
       }
       else if (gm_lkas_ptbus_state == gm_never) {
-        // If it has been 2 seconds since startup and we have seen no LKAS on PT bus,
+        // If it has been 20 seconds since startup and we have seen no LKAS on PT bus,
         // it is safe to assume we will not and we can enable TX
         uint32_t ts = microsecond_timer_get();
         uint32_t elapsed = get_ts_elapsed(ts, gm_init_ts);
-        if (elapsed > (2 * 1000 * 1000)) {
-          puts("gm_rx_hook: No LKAS on PT bus since startup for over 10 second - clearing flag");
+        if (elapsed > (20 * 1000 * 1000)) {
+          puts("gm_rx_hook: No LKAS on PT bus since startup for over 20 second - clearing flag\n");
           gm_camera_on_pt = false;
         }
       }
@@ -140,7 +140,7 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
     // LKAS messages should only be received on the PT bus if the relay is closed
     // Either it hasn't opened yet, or it faulted
     if (addr == 384) {
-      puts("gm_rx_hook: LKAS frame on PT bus");
+      puts("gm_rx_hook: LKAS frame on PT bus\n");
       //TODO: Do we need to run all this if in Dashcam mode?
       gm_enable_fwd = false;
       gm_camera_on_pt = true;
@@ -151,7 +151,7 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
 
 
       if ((gm_lkas_ptbus_state == gm_past) || gm_camera_on_pt == false) {
-        puts("gm_rx_hook: unexpected LKAS frame on PT bus - relay malfunction?");
+        puts("gm_rx_hook: unexpected LKAS frame on PT bus - relay malfunction?\n");
         relay_malfunction_set();
         // We will allow forwarding to resume if camera disappears from PT
         // Note on picky EPS chances are good LKAS faulted
@@ -260,7 +260,7 @@ static int gm_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
   if (addr == 0x200) {
     if (!current_controls_allowed) {
       if (GET_BYTE(to_send, 0) || GET_BYTE(to_send, 1)) {
-        puts("gas safety check failed");
+        puts("gas safety check failed\n");
         tx = 0;
       }
     }
@@ -384,7 +384,7 @@ static const addr_checks* gm_init(int16_t param) {
   gm_init_ts = microsecond_timer_get();
 
   if (car_harness_status == HARNESS_STATUS_NC) {
-    puts("gm_init: No harness attached, assuming OBD or Giraffe");
+    puts("gm_init: No harness attached, assuming OBD or Giraffe\n");
     //OBD harness and older pandas use bus 1 and no relay
     gm_camera_bus = 1;
     gm_camera_on_pt = false;
@@ -425,7 +425,7 @@ static int gm_fwd_hook(int bus_num, CAN_FIFOMailBox_TypeDef *to_fwd) {
           gm_good_lkas_cnt++;
         }
         else {
-          puts("gm_fwd_hook: Non-LKAS Frame ID 384 seen on cam bus, permabanning forwarding!");
+          puts("gm_fwd_hook: Non-LKAS Frame ID 384 seen on cam bus, permabanning forwarding!\n");
           gm_good_lkas_cnt = 0;
           gm_bad_cam_traffic = true;
           gm_enable_fwd = false;
@@ -433,7 +433,7 @@ static int gm_fwd_hook(int bus_num, CAN_FIFOMailBox_TypeDef *to_fwd) {
 
         //If we have seen 9 valid LKAS frames on the cam bus, AND it is not on the PT, enable forwarding
         if (gm_good_lkas_cnt >= 9) {
-          puts("gm_fwd_hook: 9 good LKAS frames on cam bus, conditions good, enabling forwarding!");
+          puts("gm_fwd_hook: 9 good LKAS frames on cam bus, conditions good, enabling forwarding!\n");
           gm_enable_fwd = true;
           bus_fwd = 0;
         }

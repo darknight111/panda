@@ -2,7 +2,7 @@ import os
 import subprocess
 
 PREFIX = "arm-none-eabi-"
-BUILDER = "DEV"
+BUILDER = "DGM"
 
 common_flags = []
 build_projects = {}
