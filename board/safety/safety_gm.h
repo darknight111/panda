@@ -55,10 +55,6 @@ uint32_t gm_init_ts = 0; //
 
 int gm_lkas_last_rc = -1; // Last rolling counter
 uint32_t gm_lkas_last_ts = 0; // TS of last LKAS frame
-
-
-
-
 bool gm_has_relay = true; // If there is a relay (harness) present
 bool gm_relay_open_requested = false; // We must enable the relay ourselves so we can capture stock camera RC
 bool gm_camera_on_pt = true; // Block tx while camera is still on PT bus. Assume true.
@@ -87,21 +83,21 @@ static bool gm_verify_lkas(CAN_FIFOMailBox_TypeDef *to_check) {
     puts("gm_verify_lkas: Frame is wrong size!\n");
     is_correct = false;
   }
-  else {
-    int rolling_counter = GET_BYTE(to_check, 0) >> 4;
-    if (rolling_counter < 0 || rolling_counter > 3) {
-      is_correct = false;
-      puts("gm_verify_lkas: Rolling counter out of range\n");
-    }
-    else {
-      int desired_torque = ((GET_BYTE(to_check, 0) & 0x7U) << 8) + GET_BYTE(to_check, 1);
-      if (!max_limit_check(desired_torque, GM_MAX_STEER, -GM_MAX_STEER)) {
-        puts("gm_verify_lkas: FYI: Torque out of range - Condition disabled\n");
-        //is_correct = false;
-        //TODO: dump torque value
-      }
-    }
-  }
+  // else {
+  //   int rolling_counter = GET_BYTE(to_check, 0) >> 4;
+  //   if (rolling_counter < 0 || rolling_counter > 3) {
+  //     is_correct = false;
+  //     puts("gm_verify_lkas: Rolling counter out of range\n");
+  //   }
+  //   else {
+  //     int desired_torque = ((GET_BYTE(to_check, 0) & 0x7U) << 8) + GET_BYTE(to_check, 1);
+  //     if (!max_limit_check(desired_torque, GM_MAX_STEER, -GM_MAX_STEER)) {
+  //       puts("gm_verify_lkas: FYI: Torque out of range - Condition disabled\n");
+  //       //is_correct = false;
+  //       //TODO: dump torque value
+  //     }
+  //   }
+  // }
   return is_correct;
 }
 
@@ -144,7 +140,6 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
     // LKAS messages should only be received on the PT bus if the relay is closed
     // Either it hasn't opened yet, or it faulted
     if (addr == 384) {
-      puts("gm_rx_hook: LKAS frame on PT bus\n");
       if (gm_has_relay) {
         //TODO: Do we need to run all this if in Dashcam mode?
         gm_enable_fwd = false;
@@ -153,6 +148,11 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
         uint32_t ts = microsecond_timer_get();
         gm_lkas_last_ts = ts;
         gm_lkas_last_rc = GET_BYTE(to_push, 0) >> 4;
+
+        puts("gm_rx_hook: LKAS frame on PT bus, RC: ");
+        putui(gm_lkas_last_ts);
+        puts("\n");
+
 
         if ((gm_lkas_ptbus_state == gm_past) || gm_camera_on_pt == false) {
           puts("gm_rx_hook: unexpected LKAS frame on PT bus - relay malfunction?\n");
@@ -164,6 +164,8 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
         }
 
         if (gm_has_relay && !gm_relay_open_requested) {
+          puts("gm_rx_hook: Requesting relay open");
+
           //Copied from main.c
           set_intercept_relay(true);
           heartbeat_counter = 0U;
@@ -173,6 +175,7 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
         }
       }
       else {
+        puts("gm_rx_hook: unexpected LKAS frame on PT bus - No Relay!!\n");
         // If there is no relay we should never see cam on PT bus. Permaban forwarding
         // TODO: this should trigger dashcam mode
         gm_camera_on_pt = true;
@@ -245,7 +248,8 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
     // on powertrain bus.
     // 384 = ASCMLKASteeringCmd
     // 715 = ASCMGasRegenCmd
-    // Removing 384 as we to expect it
+    // Removing 384 as we expect it. 
+    // TODO: both of these could happen
     generic_rx_checks(addr == 715);
   }
   return valid;
@@ -311,6 +315,7 @@ static int gm_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
   // LKA STEER: safety check
   if (addr == 384) {
     if (gm_camera_on_pt) {
+      puts("gm_tx_hook: Dropping OP frame because cam still on PT");
       tx = 0; //No LKAS from OP if camera is on PT bus
     }
     else {
@@ -364,10 +369,19 @@ static int gm_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
       if (tx == 1) {
         uint32_t lkas_elapsed = get_ts_elapsed(ts, gm_lkas_last_ts);
         int expected_lkas_rc = gm_next_rc(gm_lkas_last_rc);    //(gm_lkas_last_rc + 1) % 4;
+
         //If less than 20ms have passed since last LKAS message or the rolling counter value isn't correct it is a violation
         //TODO: The interval may need some fine tuning - testing the tolerance of the PSCM / send lag
         if (lkas_elapsed < GM_LKAS_MIN_INTERVAL || rolling_counter != expected_lkas_rc) { //TODO: move into violation
           tx = 0;
+          puts("OP LKAS RC: ");
+          putui(rolling_counter);
+          puts(", Expected: ");
+          putui(expected_lkas_rc);
+          puts(", Elapsed since last: ");
+          putui(lkas_elapsed);
+          puts(" DROPPED");
+          puts("\n");
         }
         else {
           //otherwise, save values
@@ -375,7 +389,6 @@ static int gm_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
           gm_lkas_last_ts = ts;
         }
       }
-
     }
   }
 
@@ -403,6 +416,15 @@ static const addr_checks* gm_init(int16_t param) {
   UNUSED(param);
   controls_allowed = false;
   relay_malfunction_reset();
+  puts("gm_init: Called\n");
+  gm_lkas_last_rc = -1; // Last rolling counter
+  gm_lkas_last_ts = 0; // TS of last LKAS frame
+  gm_has_relay = true; // If there is a relay (harness) present
+  gm_relay_open_requested = false; // We must enable the relay ourselves so we can capture stock camera RC
+  gm_camera_on_pt = true; // Block tx while camera is still on PT bus. Assume true.
+  gm_bad_cam_traffic = false; // Unexpected traffic on cam bus means radar or chassis
+  gm_enable_fwd = false; // All conditions are clear to enable forwarding!
+  gm_good_lkas_cnt = 0; // Number of valid LKAS frames on cam bus up to limit
 
   gm_init_ts = microsecond_timer_get();
 
@@ -460,7 +482,6 @@ static int gm_fwd_hook(int bus_num, CAN_FIFOMailBox_TypeDef *to_fwd) {
         if (gm_good_lkas_cnt >= 9) {
           puts("gm_fwd_hook: 9 good LKAS frames on cam bus, conditions good, enabling forwarding!\n");
           gm_enable_fwd = true;
-          bus_fwd = 0;
         }
       }
     }
