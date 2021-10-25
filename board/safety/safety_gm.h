@@ -150,7 +150,7 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
         gm_lkas_last_rc = GET_BYTE(to_push, 0) >> 4;
 
         puts("gm_rx_hook: LKAS frame on PT bus, RC: ");
-        putui(gm_lkas_last_ts);
+        putui(gm_lkas_last_rc);
         puts("\n");
 
 
@@ -369,7 +369,9 @@ static int gm_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
       if (tx == 1) {
         uint32_t lkas_elapsed = get_ts_elapsed(ts, gm_lkas_last_ts);
         int expected_lkas_rc = gm_next_rc(gm_lkas_last_rc);    //(gm_lkas_last_rc + 1) % 4;
-
+        puts("OP LKAS TX ALLOW TORQUE: ");
+        puth(desired_torque);
+        puts("\n");
         //If less than 20ms have passed since last LKAS message or the rolling counter value isn't correct it is a violation
         //TODO: The interval may need some fine tuning - testing the tolerance of the PSCM / send lag
         if (lkas_elapsed < GM_LKAS_MIN_INTERVAL || rolling_counter != expected_lkas_rc) { //TODO: move into violation
@@ -388,6 +390,9 @@ static int gm_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
           gm_lkas_last_rc = rolling_counter;
           gm_lkas_last_ts = ts;
         }
+      }
+      else {
+        puts("gm_tx_hook: LKAS frame tx is 0\n");
       }
     }
   }
