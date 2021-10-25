@@ -92,7 +92,7 @@ static bool gm_verify_lkas(CAN_FIFOMailBox_TypeDef *to_check) {
     }
     else {
       int desired_torque = ((GET_BYTE(to_check, 0) & 0x7U) << 8) + GET_BYTE(to_check, 1);
-      if (!max_limit_check(desired_torque, GM_MAX_STEER, -GM_MAX_STEER) {
+      if (!max_limit_check(desired_torque, GM_MAX_STEER, -GM_MAX_STEER)) {
         puts("gm_verify_lkas: FYI: Torque out of range - Condition disabled\n");
         //is_correct = false;
       }
