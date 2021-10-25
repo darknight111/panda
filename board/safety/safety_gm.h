@@ -315,7 +315,7 @@ static int gm_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
   // LKA STEER: safety check
   if (addr == 384) {
     if (gm_camera_on_pt) {
-      puts("gm_tx_hook: Dropping OP frame because cam still on PT");
+      puts("gm_tx_hook: Dropping OP frame because cam still on PT\n");
       tx = 0; //No LKAS from OP if camera is on PT bus
     }
     else {
