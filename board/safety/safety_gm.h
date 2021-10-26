@@ -74,36 +74,6 @@ static int gm_next_rc(int current_rc) {
   return ret;
 }
 
-static bool gm_verify_lkas(CAN_FIFOMailBox_TypeDef *to_check) {
-  //Try to make sure message 384 is actually an LKAS message
-  int is_correct = true;
-
-  int len = GET_LEN(to_check);
-  if (len != 4) {
-    puts("gm_verify_lkas: Frame is wrong size!\n");
-    is_correct = false;
-  }
-  // else {
-  //   int rolling_counter = GET_BYTE(to_check, 0) >> 4;
-  //   if (rolling_counter < 0 || rolling_counter > 3) {
-  //     is_correct = false;
-  //     puts("gm_verify_lkas: Rolling counter out of range\n");
-  //   }
-  //   else {
-  //     int desired_torque = ((GET_BYTE(to_check, 0) & 0x7U) << 8) + GET_BYTE(to_check, 1);
-  //     if (!max_limit_check(desired_torque, GM_MAX_STEER, -GM_MAX_STEER)) {
-  //       puts("gm_verify_lkas: FYI: Torque out of range - Condition disabled\n");
-  //       //is_correct = false;
-  //       //TODO: dump torque value
-  //     }
-  //   }
-  // }
-  return is_correct;
-}
-
-
-
-
 static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
 
   bool valid = addr_safety_check(to_push, &gm_rx_checks, NULL, NULL, NULL);
@@ -422,6 +392,7 @@ static const addr_checks* gm_init(int16_t param) {
   controls_allowed = false;
   relay_malfunction_reset();
   puts("gm_init: Called\n");
+  // Need to re-init in case of car off and on (harness always has power)
   gm_lkas_last_rc = -1; // Last rolling counter
   gm_lkas_last_ts = 0; // TS of last LKAS frame
   gm_has_relay = true; // If there is a relay (harness) present
@@ -438,7 +409,7 @@ static const addr_checks* gm_init(int16_t param) {
     //OBD harness and older pandas use bus 1 and no relay
     gm_has_relay = false;
     gm_camera_bus = 1;
-    gm_camera_on_pt = false;
+    //gm_camera_on_pt = false; Maybe we shouldn't assume this till we are sure
   }
 
   return &gm_rx_checks;
@@ -447,47 +418,30 @@ static const addr_checks* gm_init(int16_t param) {
 static int gm_fwd_hook(int bus_num, CAN_FIFOMailBox_TypeDef *to_fwd) {
   int bus_fwd = -1;
 
-  // TODO: Simplify logic!
-  //TODO: incorporate gm_has_harness and gm_harness_open_requested.
-
-  //Being careful to only forward when safe
-  if (gm_enable_fwd && !gm_camera_on_pt && !gm_bad_cam_traffic) {
+  if (gm_enable_fwd) {
     if (bus_num == 0) {
+      //TODO: consider filtering to reduce load/traffic
       bus_fwd = gm_camera_bus; // PT Bus -> FFC
     }
     else if (bus_num == gm_camera_bus) {
-      //Note: trusting that init completes before this
       int addr = GET_ADDR(to_fwd);
-      //FFC -> PT Bus, block LKAS
-      if (addr != 384) {
+      if (GET_ADDR(to_fwd) != 384) {
         bus_fwd = 0;
       }
-      //TODO: long term - allow forwarding of stock camera and block op when op is disengaged
     }
   }
-  else { //no forward OR pt on cam bus OR bad cam traffic
-    if (bus_num == gm_camera_bus && !gm_camera_on_pt && !gm_bad_cam_traffic) {
-      //camera is not on PT bus and we haven't seen anything bad on camera bus
-      // That is, only when conditions are correct for forwarding, but forwarding ins't enabled
-      int addr = GET_ADDR(to_fwd);
-
-      if (addr == 384) {
-        // Verify the LKAS frame. If it has 384 but doesn't have correct format permanently block forwarding
-        if (gm_verify_lkas(to_fwd)) {
-          gm_good_lkas_cnt++;
-        }
-        else {
-          puts("gm_fwd_hook: Non-LKAS Frame ID 384 seen on cam bus, permabanning forwarding!\n");
-          gm_good_lkas_cnt = 0;
-          gm_bad_cam_traffic = true;
-          gm_enable_fwd = false;
-        }
-
-        //If we have seen 9 valid LKAS frames on the cam bus, AND it is not on the PT, enable forwarding
-        if (gm_good_lkas_cnt >= 9) {
-          puts("gm_fwd_hook: 9 good LKAS frames on cam bus, conditions good, enabling forwarding!\n");
+  else {
+    if (!gm_camera_on_pt && !gm_bad_cam_traffic && bus_num == gm_camera_bus && GET_ADDR(to_fwd) == 384) {
+      if (GET_LEN(to_fwd) == 4) {
+        gm_good_lkas_cnt++;
+        if (gm_good_lkas_cnt > 9) {
+          puts("gm_fwd_hook: 10 good LKAS frames on cam bus, conditions good, enabling forwarding!\n");
           gm_enable_fwd = true;
         }
+      }
+      else {
+        puts("gm_fwd_hook: Non-LKAS Frame ID 384 seen on cam bus, permabanning forwarding!\n");
+        gm_bad_cam_traffic = true;
       }
     }
   }
