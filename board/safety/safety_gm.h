@@ -179,6 +179,7 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
     // on powertrain bus.
     // 384 = ASCMLKASteeringCmd
     // 715 = ASCMGasRegenCmd
+    // TODO: debugatron
     //generic_rx_checks((addr == 384) || (addr == 715));
   }
   return valid;
@@ -379,12 +380,12 @@ static int gm_fwd_hook(int bus_num, CAN_FIFOMailBox_TypeDef *to_fwd) {
         if (GET_LEN(to_fwd) == 4) {
           gm_good_lkas_cnt++;
           if (gm_good_lkas_cnt > 9) {
-            //puts("gm_fwd_hook: 10 good LKAS frames on cam bus, conditions good, enabling forwarding!\n");
+            puts("gm_fwd_hook: 10 good LKAS frames on cam bus, conditions good, enabling forwarding!\n");
             gm_fwd_enable = true;
           }
         }
         else {
-          //puts("gm_fwd_hook: Non-LKAS Frame ID 384 seen on cam bus, permabanning forwarding!\n");
+          puts("gm_fwd_hook: Non-LKAS Frame ID 384 seen on cam bus, permabanning forwarding!\n");
           gm_fwd_block = true;
           gm_fwd_enable = false;
         }
