@@ -105,7 +105,7 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
         gm_lkas_last_rc = GET_BYTE(to_push, 0) >> 4;
 
         if (!gm_relay_open_requested) {
-          puts("gm_rx_hook: Requesting relay open");
+          puts("gm_rx_hook: Requesting relay open\n");
           //Copied from main.c
           set_intercept_relay(true);
           heartbeat_counter = 0U;
