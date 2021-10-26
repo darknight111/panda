@@ -7,7 +7,8 @@
 //      accel rising edge
 //      brake rising edge
 //      brake > 0mph
-//TODO: The logic in here can be simplified dramatically
+
+// TODO: Handle relay close - block OP first, wait for RC to line up, close relay
 
 const int GM_MAX_STEER = 300;
 const int GM_MAX_RT_DELTA = 128;          // max delta torque allowed for real time checks
@@ -20,6 +21,8 @@ const int GM_MAX_GAS = 3072;
 const int GM_MAX_REGEN = 1404;
 const int GM_MAX_BRAKE = 350;
 const uint32_t GM_LKAS_MIN_INTERVAL = 20000;    // 20ms minimum between LKAS frames
+const uint32_t GM_LKAS_SETTLE_WINDOW = 10 * 1000 * 1000; // Time after which we assume LKAS state is settled
+const uint32_t GM_LKAS_RELAY_WINDOW = 500 * 1000; // Time after last LKAS to assume LKAS gone
 const int GM_GAS_INTERCEPTOR_THRESHOLD = 458;  // (610 + 306.25) / 2ratio between offset and gain from dbc file
 #define GM_GET_INTERCEPTOR(msg) (((GET_BYTE((msg), 0) << 8) + GET_BYTE((msg), 1) + (GET_BYTE((msg), 2) << 8) + GET_BYTE((msg), 3)) / 2) // avg between 2 tracks
 
@@ -39,70 +42,28 @@ AddrCheckStruct gm_addr_checks[] = {
   //{.msg = {{384, 0, 4, .expected_timestep = 100000U}, { 0 }, { 0 }}}, // Object and or chassis bus includes 384 with different size
 };
 #define GM_RX_CHECK_LEN (sizeof(gm_addr_checks) / sizeof(gm_addr_checks[0]))
+#define GM_NEXT_RC ((gm_lkas_last_rc < 3) ? (gm_lkas_last_rc + 1) : 0)
 addr_checks gm_rx_checks = {gm_addr_checks, GM_RX_CHECK_LEN};
 
-//LKAS vars for ensuring in-order, correct timing
+//LKAS vars for ensuring in-order, correct timing and safe forwarding
 
-enum gm_lkas_state {gm_never,gm_recent,gm_past};
-
-enum gm_lkas_state gm_lkas_ptbus_state = gm_never;
-
-
-
+// set in init
 int gm_camera_bus = 2; // 2 is c2 default. 1 for obd
-
-uint32_t gm_init_ts = 0; //
-
-int gm_lkas_last_rc = -1; // Last rolling counter
-uint32_t gm_lkas_last_ts = 0; // TS of last LKAS frame
 bool gm_has_relay = true; // If there is a relay (harness) present
+uint32_t gm_init_ts = 0; // TS of init
+// set in rx / tx
+uint32_t gm_lkas_pt_last_ts = 0; // TS of last LKAS frame seen on PT
 bool gm_relay_open_requested = false; // We must enable the relay ourselves so we can capture stock camera RC
-bool gm_camera_on_pt = true; // Block tx while camera is still on PT bus. Assume true.
-bool gm_bad_cam_traffic = false; // Unexpected traffic on cam bus means radar or chassis
-bool gm_enable_fwd = false; // All conditions are clear to enable forwarding!
+bool gm_camera_off_pt = false; // Block tx while camera is still on PT bus
+uint32_t gm_lkas_last_ts = 0; // TS of last LKAS frame sent to EPS
+int gm_lkas_last_rc = -1; // Last rolling counter
+// set in fwd
+bool gm_fwd_enable = false; // All conditions are clear to enable forwarding!
+bool gm_fwd_block = false; // No camera on cam bus
 int gm_good_lkas_cnt = 0; // Number of valid LKAS frames on cam bus up to limit
 
 
 // TODO: Reminder: Handle remap of chassis and radar in OP
-
-static int gm_next_rc(int current_rc) {
-  //Should be faster than modulo
-  int ret = 0;
-  if (current_rc < 3) {
-    ret = current_rc + 1;
-  }
-  return ret;
-}
-
-static bool gm_verify_lkas(CAN_FIFOMailBox_TypeDef *to_check) {
-  //Try to make sure message 384 is actually an LKAS message
-  int is_correct = true;
-
-  int len = GET_LEN(to_check);
-  if (len != 4) {
-    puts("gm_verify_lkas: Frame is wrong size!\n");
-    is_correct = false;
-  }
-  // else {
-  //   int rolling_counter = GET_BYTE(to_check, 0) >> 4;
-  //   if (rolling_counter < 0 || rolling_counter > 3) {
-  //     is_correct = false;
-  //     puts("gm_verify_lkas: Rolling counter out of range\n");
-  //   }
-  //   else {
-  //     int desired_torque = ((GET_BYTE(to_check, 0) & 0x7U) << 8) + GET_BYTE(to_check, 1);
-  //     if (!max_limit_check(desired_torque, GM_MAX_STEER, -GM_MAX_STEER)) {
-  //       puts("gm_verify_lkas: FYI: Torque out of range - Condition disabled\n");
-  //       //is_correct = false;
-  //       //TODO: dump torque value
-  //     }
-  //   }
-  // }
-  return is_correct;
-}
-
-
-
 
 static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
 
@@ -110,62 +71,44 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
 
   if (valid && (GET_BUS(to_push) == 0)) {
     int addr = GET_ADDR(to_push);
-    int len = GET_LEN(to_push);
 
+    if (!gm_camera_off_pt && !gm_fwd_block) {
+      uint32_t ts = microsecond_timer_get();
 
-    if (gm_has_relay && gm_camera_on_pt) { //defaults true
-      if (gm_lkas_ptbus_state == gm_recent) {
-        // Check to see if has been long enough since the last lkas on PT to assume relay opened
-        // Stock inactive frames are every 100ms - so 5 missed frames
-        uint32_t ts = microsecond_timer_get();
-        uint32_t elapsed = get_ts_elapsed(ts, gm_lkas_last_ts);
-        if (elapsed > (500 * 1000)) {
-          puts("gm_rx_hook: LKAS disappeared from PT, setting past and off PT\n");
-          gm_lkas_ptbus_state = gm_past;
-          gm_camera_on_pt = false;
+      if (gm_lkas_pt_last_ts == 0) {
+        uint32_t elapsed = get_ts_elapsed(ts, gm_init_ts);
+        if (elapsed > GM_LKAS_SETTLE_WINDOW) {
+          puts("gm_rx_hook: Assuming no LKAS on PT bus\n");
+          gm_camera_off_pt = true;
         }
       }
-      else if (gm_lkas_ptbus_state == gm_never) {
-        // If it has been 20 seconds since startup and we have seen no LKAS on PT bus,
-        // it is safe to assume we will not and we can enable TX
-        uint32_t ts = microsecond_timer_get();
-        uint32_t elapsed = get_ts_elapsed(ts, gm_init_ts);
-        if (elapsed > (20 * 1000 * 1000)) {
-          puts("gm_rx_hook: No LKAS on PT bus since startup for over 20 second - clearing flag\n");
-          gm_camera_on_pt = false;
+      else {
+        uint32_t elapsed = get_ts_elapsed(ts, gm_lkas_pt_last_ts);
+        if (elapsed > GM_LKAS_RELAY_WINDOW) {
+          puts("gm_rx_hook: LKAS gone from PT bus (relay opened)\n");
+          gm_camera_off_pt = true;
         }
       }
     }
 
-    // LKAS messages should only be received on the PT bus if the relay is closed
-    // Either it hasn't opened yet, or it faulted
-    if (addr == 384) {
-      if (gm_has_relay) {
-        //TODO: Do we need to run all this if in Dashcam mode?
-        gm_enable_fwd = false;
-        gm_camera_on_pt = true;
-        gm_lkas_ptbus_state = gm_recent;
+    // LKAS on PT means relay not open or no relay + bad wiring
+    if (addr == 384 && !gm_fwd_block) {
+      if (!gm_has_relay) {
+        puts("gm_rx_hook: LKAS on PT without relay = bad wiring\n");
+        gm_camera_off_pt = false;
+        gm_fwd_block = true;
+        gm_fwd_enable = false;
+      }
+      else {
+        gm_camera_off_pt = false;
+        gm_fwd_enable = false;
         uint32_t ts = microsecond_timer_get();
         gm_lkas_last_ts = ts;
+        gm_lkas_pt_last_ts = ts;
         gm_lkas_last_rc = GET_BYTE(to_push, 0) >> 4;
 
-        puts("gm_rx_hook: LKAS frame on PT bus, RC: ");
-        putui(gm_lkas_last_rc);
-        puts("\n");
-
-
-        if ((gm_lkas_ptbus_state == gm_past) || gm_camera_on_pt == false) {
-          puts("gm_rx_hook: unexpected LKAS frame on PT bus - relay malfunction?\n");
-          relay_malfunction_set();
-          // We will allow forwarding to resume if camera disappears from PT
-          // Note on picky EPS chances are good LKAS faulted
-          // Reset good frame counter
-          gm_good_lkas_cnt = 0;
-        }
-
-        if (gm_has_relay && !gm_relay_open_requested) {
+        if (!gm_relay_open_requested) {
           puts("gm_rx_hook: Requesting relay open");
-
           //Copied from main.c
           set_intercept_relay(true);
           heartbeat_counter = 0U;
@@ -174,19 +117,10 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
           gm_relay_open_requested = true;
         }
       }
-      else {
-        puts("gm_rx_hook: unexpected LKAS frame on PT bus - No Relay!!\n");
-        // If there is no relay we should never see cam on PT bus. Permaban forwarding
-        // TODO: this should trigger dashcam mode
-        gm_camera_on_pt = true;
-        gm_enable_fwd = false;
-        gm_bad_cam_traffic = true;
-      }
-
     }
 
     // Pedal Interceptor
-    if (addr == 0x201 && len == 6) {
+    if (addr == 0x201 && GET_LEN(to_push) == 6) {
       gas_interceptor_detected = 1;
       int gas_interceptor = GM_GET_INTERCEPTOR(to_push);
       gas_pressed = gas_interceptor > GM_GAS_INTERCEPTOR_THRESHOLD;
@@ -315,8 +249,7 @@ static int gm_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
 
   // LKA STEER: safety check
   if (addr == 384) {
-    if (gm_camera_on_pt) {
-      puts("gm_tx_hook: Dropping OP frame because cam still on PT\n");
+    if (!gm_camera_off_pt) {
       tx = 0; //No LKAS from OP if camera is on PT bus
     }
     else {
@@ -369,18 +302,17 @@ static int gm_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
       //TODO: Maybe should be checked at the moment the frame is sent via CAN - rcv interrupt could maybe prevent sending??
       if (tx == 1) {
         uint32_t lkas_elapsed = get_ts_elapsed(ts, gm_lkas_last_ts);
-        int expected_lkas_rc = gm_next_rc(gm_lkas_last_rc);    //(gm_lkas_last_rc + 1) % 4;
+        int expected_lkas_rc = GM_NEXT_RC;    //(gm_lkas_last_rc + 1) % 4;
         //If less than 20ms have passed since last LKAS message or the rolling counter value isn't correct it is a violation
         //TODO: The interval may need some fine tuning - testing the tolerance of the PSCM / send lag
         if (lkas_elapsed < GM_LKAS_MIN_INTERVAL || rolling_counter != expected_lkas_rc) { //TODO: move into violation
           tx = 0;
-          puts("OP LKAS RC: ");
+          puts("### DROPPING LKAS. RC: ");
           putui(rolling_counter);
           puts(", Expected: ");
           putui(expected_lkas_rc);
           puts(", Elapsed since last: ");
           putui(lkas_elapsed);
-          puts(" DROPPED");
           puts("\n");
         }
         else {
@@ -417,15 +349,17 @@ static const addr_checks* gm_init(int16_t param) {
   controls_allowed = false;
   relay_malfunction_reset();
   puts("gm_init: Called\n");
-  gm_lkas_last_rc = -1; // Last rolling counter
-  gm_lkas_last_ts = 0; // TS of last LKAS frame
-  gm_has_relay = true; // If there is a relay (harness) present
-  gm_relay_open_requested = false; // We must enable the relay ourselves so we can capture stock camera RC
-  gm_camera_on_pt = true; // Block tx while camera is still on PT bus. Assume true.
-  gm_bad_cam_traffic = false; // Unexpected traffic on cam bus means radar or chassis
-  gm_enable_fwd = false; // All conditions are clear to enable forwarding!
+  // Need to re-init in case of car off and on (harness always has power)
+  gm_camera_bus = 2;
+  gm_lkas_last_rc = -1;
+  gm_has_relay = true;
+  gm_relay_open_requested = false;
+  gm_camera_off_pt = false;
+  gm_fwd_block = false;
+  gm_fwd_enable = false; // All conditions are clear to enable forwarding!
   gm_good_lkas_cnt = 0; // Number of valid LKAS frames on cam bus up to limit
-
+  gm_lkas_last_ts = 0;
+  gm_lkas_pt_last_ts = 0;
   gm_init_ts = microsecond_timer_get();
 
   if (car_harness_status == HARNESS_STATUS_NC) {
@@ -433,7 +367,7 @@ static const addr_checks* gm_init(int16_t param) {
     //OBD harness and older pandas use bus 1 and no relay
     gm_has_relay = false;
     gm_camera_bus = 1;
-    gm_camera_on_pt = false;
+    //gm_camera_on_pt = false; Maybe we shouldn't assume this till we are sure
   }
 
   return &gm_rx_checks;
@@ -441,47 +375,31 @@ static const addr_checks* gm_init(int16_t param) {
 
 static int gm_fwd_hook(int bus_num, CAN_FIFOMailBox_TypeDef *to_fwd) {
   int bus_fwd = -1;
-
-  // TODO: Simplify logic!
-  //TODO: incorporate gm_has_harness and gm_harness_open_requested.
-
-  //Being careful to only forward when safe
-  if (gm_enable_fwd && !gm_camera_on_pt && !gm_bad_cam_traffic) {
-    if (bus_num == 0) {
-      bus_fwd = gm_camera_bus; // PT Bus -> FFC
-    }
-    else if (bus_num == gm_camera_bus) {
-      //Note: trusting that init completes before this
-      int addr = GET_ADDR(to_fwd);
-      //FFC -> PT Bus, block LKAS
-      if (addr != 384) {
-        bus_fwd = 0;
+  if (!gm_fwd_block) {
+    if (gm_fwd_enable) {
+      if (bus_num == 0) {
+        //TODO: consider filtering to reduce load/traffic
+        bus_fwd = gm_camera_bus; // PT Bus -> FFC
       }
-      //TODO: long term - allow forwarding of stock camera and block op when op is disengaged
+      else if (bus_num == gm_camera_bus) {
+        if (GET_ADDR(to_fwd) != 384) {
+          bus_fwd = 0;
+        }
+      }
     }
-  }
-  else { //no forward OR pt on cam bus OR bad cam traffic
-    if (bus_num == gm_camera_bus && !gm_camera_on_pt && !gm_bad_cam_traffic) {
-      //camera is not on PT bus and we haven't seen anything bad on camera bus
-      // That is, only when conditions are correct for forwarding, but forwarding ins't enabled
-      int addr = GET_ADDR(to_fwd);
-
-      if (addr == 384) {
-        // Verify the LKAS frame. If it has 384 but doesn't have correct format permanently block forwarding
-        if (gm_verify_lkas(to_fwd)) {
+    else {
+      if (gm_camera_off_pt && bus_num == gm_camera_bus && GET_ADDR(to_fwd) == 384) {
+        if (GET_LEN(to_fwd) == 4) {
           gm_good_lkas_cnt++;
+          if (gm_good_lkas_cnt > 9) {
+            puts("gm_fwd_hook: 10 good LKAS frames on cam bus, conditions good, enabling forwarding!\n");
+            gm_fwd_enable = true;
+          }
         }
         else {
           puts("gm_fwd_hook: Non-LKAS Frame ID 384 seen on cam bus, permabanning forwarding!\n");
-          gm_good_lkas_cnt = 0;
-          gm_bad_cam_traffic = true;
-          gm_enable_fwd = false;
-        }
-
-        //If we have seen 9 valid LKAS frames on the cam bus, AND it is not on the PT, enable forwarding
-        if (gm_good_lkas_cnt >= 9) {
-          puts("gm_fwd_hook: 9 good LKAS frames on cam bus, conditions good, enabling forwarding!\n");
-          gm_enable_fwd = true;
+          gm_fwd_block = true;
+          gm_fwd_enable = false;
         }
       }
     }
