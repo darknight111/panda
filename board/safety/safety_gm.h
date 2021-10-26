@@ -384,7 +384,6 @@ static int gm_fwd_hook(int bus_num, CAN_FIFOMailBox_TypeDef *to_fwd) {
         bus_fwd = gm_camera_bus; // PT Bus -> FFC
       }
       else if (bus_num == gm_camera_bus) {
-        int addr = GET_ADDR(to_fwd);
         if (GET_ADDR(to_fwd) != 384) {
           bus_fwd = 0;
         }
