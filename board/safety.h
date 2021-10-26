@@ -138,6 +138,7 @@ void safety_tick(const addr_checks *rx_checks) {
       bool lagging = elapsed_time > MAX(rx_checks->check[i].msg[rx_checks->check[i].index].expected_timestep * MAX_MISSED_MSGS, 1e6);
       rx_checks->check[i].lagging = lagging;
       if (lagging) {
+        puts("safety_tick: Too much lag killing controls\n");
         controls_allowed = 0;
       }
     }
@@ -158,6 +159,7 @@ bool is_msg_valid(AddrCheckStruct addr_list[], int index) {
   if (index != -1) {
     if ((!addr_list[index].valid_checksum) || (addr_list[index].wrong_counters >= MAX_WRONG_COUNTERS)) {
       valid = false;
+      puts("is_msg_valid: Killing controls\n");
       controls_allowed = 0;
     }
   }
@@ -204,12 +206,14 @@ bool addr_safety_check(CAN_FIFOMailBox_TypeDef *to_push,
 void generic_rx_checks(bool stock_ecu_detected) {
   // exit controls on rising edge of gas press
   if (gas_pressed && !gas_pressed_prev && !(unsafe_mode & UNSAFE_DISABLE_DISENGAGE_ON_GAS)) {
+    puts("generic_rx_checks: Killing controls - gas pressed\n");
     controls_allowed = 0;
   }
   gas_pressed_prev = gas_pressed;
 
   // exit controls on rising edge of brake press
   if (brake_pressed && (!brake_pressed_prev || vehicle_moving)) {
+    puts("generic_rx_checks: Killing controls - brake pressed\n");
     controls_allowed = 0;
   }
   brake_pressed_prev = brake_pressed;

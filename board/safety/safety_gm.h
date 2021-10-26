@@ -248,9 +248,10 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
     // on powertrain bus.
     // 384 = ASCMLKASteeringCmd
     // 715 = ASCMGasRegenCmd
-    // Removing 384 as we expect it. 
-    // TODO: both of these could happen
-    generic_rx_checks(addr == 715);
+    // TODO: JJS - disabled for debugging
+    // if (!gm_camera_on_pt && !gm_has_relay) {
+    //   generic_rx_checks((addr == 384) || (addr == 715));
+    // }
   }
   return valid;
 }
@@ -369,9 +370,6 @@ static int gm_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
       if (tx == 1) {
         uint32_t lkas_elapsed = get_ts_elapsed(ts, gm_lkas_last_ts);
         int expected_lkas_rc = gm_next_rc(gm_lkas_last_rc);    //(gm_lkas_last_rc + 1) % 4;
-        puts("OP LKAS TX ALLOW TORQUE: ");
-        puth(desired_torque);
-        puts("\n");
         //If less than 20ms have passed since last LKAS message or the rolling counter value isn't correct it is a violation
         //TODO: The interval may need some fine tuning - testing the tolerance of the PSCM / send lag
         if (lkas_elapsed < GM_LKAS_MIN_INTERVAL || rolling_counter != expected_lkas_rc) { //TODO: move into violation
@@ -390,9 +388,6 @@ static int gm_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
           gm_lkas_last_rc = rolling_counter;
           gm_lkas_last_ts = ts;
         }
-      }
-      else {
-        puts("gm_tx_hook: LKAS frame tx is 0\n");
       }
     }
   }
