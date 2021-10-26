@@ -38,8 +38,7 @@ AddrCheckStruct gm_addr_checks[] = {
   {.msg = {{481, 0, 7, .expected_timestep = 100000U}, { 0 }, { 0 }}},
   {.msg = {{241, 0, 6, .expected_timestep = 100000U}, { 0 }, { 0 }}},
   {.msg = {{417, 0, 7, .expected_timestep = 100000U}, { 0 }, { 0 }}},
-  {.msg = {{513, 0, 6, .expected_timestep = 100000U}, { 0 }, { 0 }}}, //pedal inbound (enforce length in case of overlap)
-  //{.msg = {{384, 0, 4, .expected_timestep = 100000U}, { 0 }, { 0 }}}, // Object and or chassis bus includes 384 with different size
+  {.msg = {{513, 0, 6, .expected_timestep = 100000U}, { 0 }, { 0 }}} //pedal inbound (enforce length in case of overlap)
 };
 #define GM_RX_CHECK_LEN (sizeof(gm_addr_checks) / sizeof(gm_addr_checks[0]))
 #define GM_NEXT_RC ((gm_lkas_last_rc < 3) ? (gm_lkas_last_rc + 1) : 0)
@@ -62,8 +61,6 @@ bool gm_fwd_enable = false; // All conditions are clear to enable forwarding!
 bool gm_fwd_block = false; // No camera on cam bus
 int gm_good_lkas_cnt = 0; // Number of valid LKAS frames on cam bus up to limit
 
-
-// TODO: Reminder: Handle remap of chassis and radar in OP
 
 static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
 
@@ -182,10 +179,7 @@ static int gm_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
     // on powertrain bus.
     // 384 = ASCMLKASteeringCmd
     // 715 = ASCMGasRegenCmd
-    // TODO: JJS - disabled for debugging
-    // if (!gm_camera_on_pt && !gm_has_relay) {
-    //   generic_rx_checks((addr == 384) || (addr == 715));
-    // }
+    generic_rx_checks((addr == 384) || (addr == 715));
   }
   return valid;
 }
@@ -227,11 +221,6 @@ static int gm_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
       }
     }
   }
-
-  // // disallow actuator commands if gas or brake (with vehicle moving) are pressed
-  // // and the the latching controls_allowed flag is True
-  // int pedal_pressed = gm_gas_prev || (gm_brake_prev && gm_moving);
-  // bool current_controls_allowed = controls_allowed && !pedal_pressed;
 
   // BRAKE: safety check
   if (addr == 789) {
@@ -299,13 +288,13 @@ static int gm_tx_hook(CAN_FIFOMailBox_TypeDef *to_send) {
         tx = 0;
       }
 
-      //TODO: Maybe should be checked at the moment the frame is sent via CAN - rcv interrupt could maybe prevent sending??
+      //TODO: Refactor as violation
       if (tx == 1) {
         uint32_t lkas_elapsed = get_ts_elapsed(ts, gm_lkas_last_ts);
         int expected_lkas_rc = GM_NEXT_RC;    //(gm_lkas_last_rc + 1) % 4;
         //If less than 20ms have passed since last LKAS message or the rolling counter value isn't correct it is a violation
         //TODO: The interval may need some fine tuning - testing the tolerance of the PSCM / send lag
-        if (lkas_elapsed < GM_LKAS_MIN_INTERVAL || rolling_counter != expected_lkas_rc) { //TODO: move into violation
+        if (lkas_elapsed < GM_LKAS_MIN_INTERVAL || rolling_counter != expected_lkas_rc) {
           tx = 0;
           puts("### DROPPING LKAS. RC: ");
           putui(rolling_counter);
@@ -348,7 +337,7 @@ static const addr_checks* gm_init(int16_t param) {
   UNUSED(param);
   controls_allowed = false;
   relay_malfunction_reset();
-  puts("gm_init: Called\n");
+  //puts("gm_init: Called\n");
   // Need to re-init in case of car off and on (harness always has power)
   gm_camera_bus = 2;
   gm_lkas_last_rc = -1;
@@ -363,11 +352,10 @@ static const addr_checks* gm_init(int16_t param) {
   gm_init_ts = microsecond_timer_get();
 
   if (car_harness_status == HARNESS_STATUS_NC) {
-    puts("gm_init: No harness attached, assuming OBD or Giraffe\n");
+    //puts("gm_init: No harness attached, assuming OBD or Giraffe\n");
     //OBD harness and older pandas use bus 1 and no relay
     gm_has_relay = false;
     gm_camera_bus = 1;
-    //gm_camera_on_pt = false; Maybe we shouldn't assume this till we are sure
   }
 
   return &gm_rx_checks;
@@ -378,7 +366,6 @@ static int gm_fwd_hook(int bus_num, CAN_FIFOMailBox_TypeDef *to_fwd) {
   if (!gm_fwd_block) {
     if (gm_fwd_enable) {
       if (bus_num == 0) {
-        //TODO: consider filtering to reduce load/traffic
         bus_fwd = gm_camera_bus; // PT Bus -> FFC
       }
       else if (bus_num == gm_camera_bus) {
@@ -392,12 +379,12 @@ static int gm_fwd_hook(int bus_num, CAN_FIFOMailBox_TypeDef *to_fwd) {
         if (GET_LEN(to_fwd) == 4) {
           gm_good_lkas_cnt++;
           if (gm_good_lkas_cnt > 9) {
-            puts("gm_fwd_hook: 10 good LKAS frames on cam bus, conditions good, enabling forwarding!\n");
+            //puts("gm_fwd_hook: 10 good LKAS frames on cam bus, conditions good, enabling forwarding!\n");
             gm_fwd_enable = true;
           }
         }
         else {
-          puts("gm_fwd_hook: Non-LKAS Frame ID 384 seen on cam bus, permabanning forwarding!\n");
+          //puts("gm_fwd_hook: Non-LKAS Frame ID 384 seen on cam bus, permabanning forwarding!\n");
           gm_fwd_block = true;
           gm_fwd_enable = false;
         }
