@@ -102,10 +102,6 @@ int usb_cb_control_msg(USB_Setup_TypeDef *setup, uint8_t *resp, bool hardwired) 
 #define CAN_GAS_OUTPUT 0x201U
 #define CAN_GAS_SIZE 6
 #define COUNTER_CYCLE 0xFU
-#define MAGIC_GAS_MULTIPLIER 0xFACE
-#define MAGIC_GAS_DIVISOR 0xDEAD
-#define MAGIC_GAS_OFFSET 0xBABE
-#define MAGIC_GAS_OFFSET_NEG 0xBEEF
 
 void CAN1_TX_IRQ_Handler(void) {
   // clear interrupt
@@ -116,6 +112,9 @@ void CAN1_TX_IRQ_Handler(void) {
 uint16_t gas_set_0 = 0;
 uint16_t gas_set_1 = 0;
 
+bool gas_scale_multiplier_set = false;
+bool gas_scale_divisor_set = false;
+bool gas_offset_set = false;
 uint16_t gas_scale_multiplier = 1;
 uint16_t gas_scale_divisor = 1;
 int16_t gas_offset = 0;
@@ -132,6 +131,14 @@ uint32_t current_index = 0;
 #define FAULT_INVALID 6U
 uint8_t state = FAULT_STARTUP;
 const uint8_t crc_poly = 0xD5U;  // standard crc8
+
+#define TRANSFORM_APPLIED 8U // 1000
+#define MAGIC_GAS_MULTIPLIER 0xFACE
+#define MAGIC_GAS_DIVISOR 0xDEAD
+#define MAGIC_GAS_OFFSET 0xBABE
+#define MAGIC_GAS_OFFSET_NEG 0xBEEF
+#define GAS_TRANSFORM_COMPLETE ((gas_scale_multiplier_set) && (gas_scale_divisor_set) && (gas_offset_set))
+#define FULL_STATE ((GAS_TRANSFORM_COMPLETE) ? ((state) & (TRANSFORM_APPLIED)) : (state))
 
 void CAN1_RX0_IRQ_Handler(void) {
   while ((CAN->RF0R & CAN_RF0R_FMP0) != 0) {
@@ -171,6 +178,7 @@ void CAN1_RX0_IRQ_Handler(void) {
             puts("\n");
           #endif
           gas_scale_multiplier = value_0;
+          gas_scale_multiplier_set = true;
         }
         else if (value_1 == MAGIC_GAS_DIVISOR && value_0 != value_1 && value_0 != gas_scale_divisor) {
           #ifdef DEBUG
@@ -179,6 +187,7 @@ void CAN1_RX0_IRQ_Handler(void) {
             puts("\n");
           #endif
           gas_scale_divisor = value_0;
+          gas_scale_divisor_set = true;
         }
         else if ((value_1 == MAGIC_GAS_OFFSET || value_1 == MAGIC_GAS_OFFSET_NEG) && value_0 != value_1) {
           int offsetval = value_1 == MAGIC_GAS_OFFSET ? (int)value_0 : (int)value_0 * -1; //value_1 is 0 for positive, 1 for negative
@@ -189,6 +198,7 @@ void CAN1_RX0_IRQ_Handler(void) {
             puts("\n");
           #endif
           gas_offset = offsetval;
+          gas_offset_set = true;
           }
         }
         else if (((current_index + 1U) & COUNTER_CYCLE) == index) {
@@ -252,7 +262,7 @@ void TIM3_IRQ_Handler(void) {
     dat[1] = (pdl0 >> 0) & 0xFFU;
     dat[2] = (pdl1 >> 8) & 0xFFU;
     dat[3] = (pdl1 >> 0) & 0xFFU;
-    dat[4] = ((state & 0xFU) << 4) | pkt_idx;
+    dat[4] = ((FULL_STATE & 0xFU) << 4) | pkt_idx;
     dat[5] = crc_checksum(dat, CAN_GAS_SIZE - 1, crc_poly);
     CAN->sTxMailBox[0].TDLR = dat[0] | (dat[1] << 8) | (dat[2] << 16) | (dat[3] << 24);
     CAN->sTxMailBox[0].TDHR = dat[4] | (dat[5] << 8);
@@ -283,9 +293,8 @@ void TIM3_IRQ_Handler(void) {
 }
 
 //Scale values from the ADC to adjust for unusual electrical characteristics
-//TODO: verify inputs are within range and we don't get outlandish crashy values while waiting for all 3 values
 uint32_t adjust(uint32_t readVal) {
-  return ((readVal * gas_scale_multiplier)/gas_scale_divisor) + gas_offset;
+  return ((GAS_TRANSFORM_COMPLETE) ? (((readVal * gas_scale_multiplier)/gas_scale_divisor) + gas_offset) : readVal);
 }
 // ***************************** main code *****************************
 
