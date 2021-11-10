@@ -1,5 +1,6 @@
 // ********************* Includes *********************
-//#define PEDAL_USB
+#define PEDAL_USB
+#define DEBUG
 #include "../config.h"
 
 #include "early_init.h"
@@ -245,12 +246,17 @@ void TIM3_IRQ_Handler(void) {
   }
 }
 
+//Scale values from the ADC to adjust for unusual electrical characteristics
+uint32_t adjust(uint32_t readVal) {
+  return ((readVal * 1545)/1000) + 25;
+}
+
 // ***************************** main code *****************************
 
 void pedal(void) {
   // read/write
-  pdl0 = adc_get(ADCCHAN_ACCEL0);
-  pdl1 = adc_get(ADCCHAN_ACCEL1);
+  pdl0 = adjust(adc_get(ADCCHAN_ACCEL0));
+  pdl1 = adjust(adc_get(ADCCHAN_ACCEL1));
 
   // write the pedal to the DAC
   if (state == NO_FAULT) {
