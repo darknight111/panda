@@ -53,6 +53,12 @@ void fault_occurred(uint32_t fault) {
 void fault_recovered(uint32_t fault) {
 }
 
+// from harness.h
+uint8_t car_harness_status = 0U;
+#define HARNESS_STATUS_NC 0U
+#define HARNESS_STATUS_NORMAL 1U
+#define HARNESS_STATUS_FLIPPED 2U
+
 #define UNUSED(x) (void)(x)
 
 #ifndef PANDA
