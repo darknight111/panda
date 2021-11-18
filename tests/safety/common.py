@@ -299,7 +299,7 @@ class PandaSafetyTest(PandaSafetyTestBase):
         fwd_bus = self.FWD_BUS_LOOKUP.get(bus, -1)
         if bus in self.FWD_BLACKLISTED_ADDRS and addr in self.FWD_BLACKLISTED_ADDRS[bus]:
           fwd_bus = -1
-        self.assertEqual(fwd_bus, self.safety.safety_fwd_hook(bus, msg))
+        self.assertEqual(fwd_bus, self.safety.safety_fwd_hook(bus, msg), f"{addr=:#x} from {bus=} to {fwd_bus=}")
 
   def test_spam_can_buses(self):
     for addr in range(1, 0x800):
@@ -424,18 +424,19 @@ class PandaSafetyTest(PandaSafetyTestBase):
           tx = getattr(getattr(test, attr), "TX_MSGS")
           if tx is not None:
             # TODO: Temporary, should be fixed in panda firmware, safety_honda.h
-            if attr in ['TestHondaBoschLongGiraffeSafety', 'TestHondaNidecSafety']:
+            if attr.startswith('TestHonda'):
+              # exceptions for common msgs across different hondas
               tx = list(filter(lambda m: m[0] not in [0x1FA, 0x30C], tx))
-            all_tx.append(tx)
+            all_tx.append(list([m[0], m[1], attr[4:]] for m in tx))
 
     # make sure we got all the msgs
     self.assertTrue(len(all_tx) >= len(test_files)-1)
 
     for tx_msgs in all_tx:
-      for addr, bus in tx_msgs:
+      for addr, bus, test_name in tx_msgs:
         msg = make_msg(bus, addr)
         self.safety.set_controls_allowed(1)
         # TODO: this should be blocked
         if current_test in ["TestNissanSafety", "TestNissanLeafSafety"] and [addr, bus] in self.TX_MSGS:
           continue
-        self.assertFalse(self._tx(msg), f"{addr=} {bus=} got through")
+        self.assertFalse(self._tx(msg), f"transmit of {addr=:#x} {bus=} from {test_name} was allowed")
