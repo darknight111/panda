@@ -281,7 +281,12 @@ static int gm_fwd_hook(int bus_num, CANPacket_t *to_fwd) {
 
   if (gm_allow_fwd && !gm_block_fwd) {
     if (bus_num == 0) {
-      bus_fwd = gm_camera_bus;
+      int addr = GET_ADDR(to_fwd);
+      //todo: edit the HandsOffSWlDetectionStatus and set to 1 (0 is hands off)
+      //Block LKAS status from camera
+      if (addr != 388) {
+        bus_fwd = gm_camera_bus;
+      }
     }
     else if (bus_num == gm_camera_bus) {
       int addr = GET_ADDR(to_fwd);
