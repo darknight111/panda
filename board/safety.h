@@ -241,7 +241,6 @@ const safety_hook_config safety_hook_registry[] = {
   {SAFETY_TOYOTA, &toyota_hooks},
   {SAFETY_ELM327, &elm327_hooks},
   {SAFETY_GM, &gm_hooks},
-  {SAFETY_HONDA_BOSCH_GIRAFFE, &honda_bosch_giraffe_hooks},
   {SAFETY_HONDA_BOSCH_HARNESS, &honda_bosch_harness_hooks},
   {SAFETY_HYUNDAI, &hyundai_hooks},
   {SAFETY_CHRYSLER, &chrysler_hooks},
@@ -273,6 +272,7 @@ int set_safety_hooks(uint16_t mode, int16_t param) {
   cruise_engaged_prev = false;
   vehicle_speed = 0;
   vehicle_moving = false;
+  acc_main_on = false;
   desired_torque_last = 0;
   rt_torque_last = 0;
   ts_angle_last = 0;
