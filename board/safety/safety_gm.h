@@ -180,7 +180,7 @@ static int gm_tx_hook(CANPacket_t *to_send) {
   int pedal_pressed = brake_pressed_prev && vehicle_moving;
   bool unsafe_allow_gas = unsafe_mode & UNSAFE_DISABLE_DISENGAGE_ON_GAS;
   if (!unsafe_allow_gas) {
-    pedal_pressed = pedal_pressed || gas_pressed_prev;
+    pedal_pressed = pedal_pressed || gas_pressed_prev || (gas_interceptor_prev > GM_GAS_INTERCEPTOR_THRESHOLD);
   }
   bool current_controls_allowed = controls_allowed && !pedal_pressed;
 
