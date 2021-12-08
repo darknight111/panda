@@ -254,7 +254,7 @@ static int gm_fwd_hook(int bus_num, CANPacket_t *to_fwd) {
       ) {
         gm_block_fwd = true;
       }
-      else {
+      else if ((addr == 384) && (len == 4)) {
         gm_good_cam_cnt++;
       }
       // Wait for 10 LKAS frames of the correct size before enabling forwarding
