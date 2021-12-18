@@ -26,8 +26,8 @@ const GM_LIMIT GM_LIMITS[] =
   { // safety param 0 - Default
     .GM_MAX_STEER = 300,
     .GM_MAX_RT_DELTA = 128,
-    .GM_MAX_RATE_UP = 7, 
-    .GM_MAX_RATE_DOWN = 17,
+    .GM_MAX_RATE_UP = 10, 
+    .GM_MAX_RATE_DOWN = 20,
     .GM_DRIVER_TORQUE_ALLOWANCE = 50,
     .GM_DRIVER_TORQUE_FACTOR = 4,
     .GM_MAX_GAS = 3072,
